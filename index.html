@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#4f46e5">
+    <title>CARPASS Lite - Smart Parking</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body { -webkit-tap-highlight-color: transparent; }
+        .screen-enter { animation: screenIn .26s ease-out both; }
+        @keyframes screenIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .pulse-ring { animation: pulseRing 1.6s ease-out infinite; }
+        @keyframes pulseRing { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,.3); } 80%,100% { box-shadow: 0 0 0 12px rgba(16,185,129,0); } }
+    </style>
+</head>
+<body class="bg-slate-100 min-h-screen p-4 flex flex-col items-center font-sans text-slate-900">
+
+    <div class="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-100">
+        <div class="bg-indigo-600 p-6 text-white text-center relative overflow-hidden">
+            <div class="absolute -right-10 -top-12 h-32 w-32 rounded-full bg-white/10 blur-xl"></div>
+            <div class="absolute -left-12 -bottom-14 h-32 w-32 rounded-full bg-cyan-300/10 blur-xl"></div>
+            <h1 class="relative text-2xl font-extrabold tracking-wide">CARPASS Lite</h1>
+            <p class="relative text-indigo-200 text-xs mt-1">ระบบบริหารลานจอดรถดิจิทัล</p>
+
+            <div id="status-badge" class="relative inline-flex items-center gap-2 mt-3 px-3 py-1 rounded-full bg-indigo-800 text-indigo-200 text-xs font-medium">
+                <span id="status-dot" class="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+                <span id="status-text">กำลังเชื่อมต่อ MQTT Broker...</span>
+            </div>
+        </div>
+
+        <div id="tab-bar" class="flex border-b text-sm font-bold bg-slate-50">
+            <button id="tab-in" type="button" onclick="switchTab('in')" class="flex-1 py-3 border-b-2 border-indigo-600 text-indigo-600 transition">
+                🚪 ขาเข้า
+            </button>
+            <button id="tab-out" type="button" onclick="switchTab('out')" class="flex-1 py-3 text-slate-400 border-b-2 border-transparent transition">
+                🚗 ขาออก
+            </button>
+        </div>
+
+        <div class="p-6 space-y-6">
+            <div id="alert-box" class="hidden p-4 rounded-2xl text-sm font-medium text-center shadow-sm transition-all"></div>
+
+            <!-- ENTRY -->
+            <div id="view-in" class="space-y-5 screen-enter">
+                <div class="bg-indigo-50 border border-indigo-100 p-4 rounded-2xl text-center">
+                    <span class="text-xs font-bold text-indigo-400 tracking-wider uppercase">สถานะประตูขาเข้า</span>
+                    <p id="in-sensor-status" class="text-sm font-semibold text-indigo-900 mt-1">
+                        กรุณาขับรถจอดหน้าเซนเซอร์เพื่อรับรหัส
+                    </p>
+                </div>
+
+                <div class="grid grid-cols-3 gap-2 text-center text-[11px] font-bold">
+                    <div id="entry-step-1" class="rounded-xl bg-indigo-600 text-white p-3">1<br><span class="font-medium">รอ OTP</span></div>
+                    <div id="entry-step-2" class="rounded-xl bg-slate-100 text-slate-400 p-3">2<br><span class="font-medium">ยืนยัน</span></div>
+                    <div id="entry-step-3" class="rounded-xl bg-slate-100 text-slate-400 p-3">3<br><span class="font-medium">รับตั๋ว</span></div>
+                </div>
+
+                <div>
+                    <label for="input-otp-in" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
+                        กรอกรหัส OTP 4 หลัก (ดูจากจอ LED บอร์ด)
+                    </label>
+                    <input type="text" inputmode="numeric" autocomplete="one-time-code" id="input-otp-in" placeholder="0000" maxlength="4"
+                        class="w-full py-4 text-center text-3xl font-extrabold text-indigo-600 bg-slate-50 border-2 border-slate-200 rounded-2xl focus:border-indigo-500 focus:bg-white outline-none tracking-[0.35em] transition">
+                    <p id="otp-hint-in" class="mt-2 text-center text-xs text-slate-400">ระบบจะเปิดให้ยืนยันเมื่อได้รับ OTP จาก KidBright</p>
+                </div>
+
+                <button id="btn-entry" type="button" onclick="submitEntry()" class="w-full py-4 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-lg rounded-2xl shadow-lg shadow-emerald-200 active:scale-95 transition disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none disabled:cursor-not-allowed">
+                    ยืนยันรหัส & รับตั๋วเข้าจอด
+                </button>
+
+                <div id="existing-ticket-note" class="hidden rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                    คุณมีตั๋วจอดรถที่กำลังใช้งานอยู่แล้ว
+                    <button type="button" onclick="showTicketView()" class="block mt-2 font-bold underline">เปิดตั๋วของฉัน →</button>
+                </div>
+            </div>
+
+            <!-- TICKET HOME -->
+            <div id="view-ticket" class="hidden space-y-5 screen-enter">
+                <div class="text-center">
+                    <div class="mx-auto w-14 h-14 rounded-full bg-emerald-100 text-emerald-600 grid place-items-center text-2xl font-black pulse-ring">✓</div>
+                    <h2 class="mt-3 text-xl font-extrabold text-slate-900">ตั๋วจอดรถพร้อมแล้ว</h2>
+                    <p class="mt-1 text-sm text-slate-500">เก็บหน้านี้ไว้จนกว่าจะออกจากลาน</p>
+                </div>
+
+                <div class="bg-slate-800 text-white p-5 rounded-2xl shadow-inner space-y-3 relative overflow-hidden">
+                    <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-indigo-500 opacity-20 rounded-full blur-xl"></div>
+                    <div class="flex justify-between items-center border-b border-slate-700 pb-2">
+                        <span class="text-xs text-slate-400">E-TICKET</span>
+                        <span id="ticket-page-status" class="text-[10px] px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300 font-bold">ACTIVE</span>
+                    </div>
+                    <div>
+                        <span class="text-xs text-slate-400">TICKET ID</span>
+                        <div id="ticket-page-id" class="mt-1 font-mono text-xl font-bold text-indigo-300">-</div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="rounded-xl bg-white/5 p-3">
+                            <div class="text-[10px] text-slate-400">เวลาเข้า</div>
+                            <div id="ticket-page-entry" class="mt-1 text-sm font-semibold">-</div>
+                        </div>
+                        <div class="rounded-xl bg-white/5 p-3">
+                            <div class="text-[10px] text-slate-400">จอดมาแล้ว</div>
+                            <div id="ticket-page-duration" class="mt-1 text-sm font-semibold text-amber-300">-</div>
+                        </div>
+                    </div>
+                    <div class="flex justify-between items-end pt-2 border-t border-slate-700">
+                        <span class="text-xs text-slate-400">ค่าบริการปัจจุบัน</span>
+                        <span id="ticket-page-fee" class="text-2xl font-extrabold text-emerald-400">0 บาท</span>
+                    </div>
+                </div>
+
+                <button type="button" onclick="switchTab('out')" class="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-2xl shadow-lg shadow-indigo-200 active:scale-95 transition">
+                    ไปหน้าชำระเงิน / ทางออก →
+                </button>
+                <button type="button" onclick="switchTab('in')" class="w-full py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl active:scale-95 transition">
+                    กลับหน้าหลัก
+                </button>
+            </div>
+
+            <!-- EXIT -->
+            <div id="view-out" class="space-y-5 hidden screen-enter">
+                <div id="no-ticket-box" class="hidden rounded-2xl border border-rose-100 bg-rose-50 p-5 text-center">
+                    <div class="text-3xl">🎫</div>
+                    <p class="mt-2 font-bold text-rose-700">ยังไม่มีตั๋วจอดรถ</p>
+                    <p class="mt-1 text-xs text-rose-500">ต้องยืนยัน OTP ขาเข้าก่อนจึงจะออกได้</p>
+                    <button type="button" onclick="switchTab('in')" class="mt-3 text-sm font-bold text-rose-700 underline">กลับไปขาเข้า</button>
+                </div>
+
+                <div id="exit-ticket-content" class="space-y-5">
+                    <div class="bg-slate-800 text-white p-5 rounded-2xl shadow-inner space-y-3 relative overflow-hidden">
+                        <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-indigo-500 opacity-20 rounded-full blur-xl"></div>
+                        <div class="flex justify-between items-center border-b border-slate-700 pb-2">
+                            <span class="text-xs text-slate-400">TICKET ID</span>
+                            <span id="ticket-id" class="font-mono text-sm font-bold text-indigo-400">-</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-slate-400">เวลาที่เข้าจอด:</span>
+                            <span id="entry-time" class="font-semibold">-</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-slate-400">ระยะเวลาจอดรวม:</span>
+                            <span id="park-duration" class="font-semibold text-amber-400">-</span>
+                        </div>
+                        <div class="flex justify-between items-center pt-2 border-t border-slate-700">
+                            <span class="text-sm font-bold">ค่าบริการทั้งหมด:</span>
+                            <span id="park-fee" class="text-2xl font-extrabold text-emerald-400">0 บาท</span>
+                        </div>
+                    </div>
+
+                    <button id="btn-pay" type="button" onclick="payFee()" class="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-2xl shadow-md transition active:scale-95 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none disabled:cursor-not-allowed">
+                        💳 ชำระเงินค่าบริการ
+                    </button>
+
+                    <div id="payment-note" class="rounded-2xl bg-slate-50 border border-slate-100 p-3 text-center text-xs text-slate-500">
+                        ฟรี 15 นาทีแรก • หลังจากนั้น 20 บาท/ชั่วโมง
+                    </div>
+
+                    <div class="pt-2 border-t border-slate-100">
+                        <p id="out-sensor-status" class="mb-3 text-center text-sm font-semibold text-slate-600">ขับรถไปยังเซนเซอร์ขาออกเพื่อรับ OTP</p>
+                        <label for="input-otp-out" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
+                            กรอกรหัส OTP 4 หลักขาออก (ดูจากจอ LED บอร์ด)
+                        </label>
+                        <input type="text" inputmode="numeric" autocomplete="one-time-code" id="input-otp-out" placeholder="0000" maxlength="4"
+                            class="w-full py-4 text-center text-3xl font-extrabold text-indigo-600 bg-slate-50 border-2 border-slate-200 rounded-2xl focus:border-indigo-500 focus:bg-white outline-none tracking-[0.35em] transition">
+                        <p id="otp-hint-out" class="mt-2 text-center text-xs text-slate-400">ต้องชำระเงินและได้รับ OTP ขาออกก่อน</p>
+                    </div>
+
+                    <button id="btn-exit" type="button" onclick="submitExit()" class="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-lg rounded-2xl shadow-lg shadow-indigo-200 active:scale-95 transition disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none disabled:cursor-not-allowed">
+                        ยืนยันออก & เปิดไม้กั้น
+                    </button>
+                </div>
+            </div>
+
+            <!-- EXIT COMPLETE -->
+            <div id="view-complete" class="hidden space-y-5 text-center screen-enter">
+                <div class="mx-auto w-20 h-20 rounded-full bg-emerald-100 text-emerald-600 grid place-items-center text-4xl font-black">✓</div>
+                <div>
+                    <h2 class="text-2xl font-extrabold text-slate-900">ออกจากลานเรียบร้อย</h2>
+                    <p class="mt-2 text-sm leading-6 text-slate-500">ขอบคุณที่ใช้ CARPASS Lite<br>ตั๋วรอบนี้ถูกปิดหลังรถผ่านเซนเซอร์ขาออกแล้ว</p>
+                </div>
+                <button type="button" onclick="startNewSession()" class="w-full py-4 bg-indigo-600 text-white font-bold rounded-2xl shadow-lg shadow-indigo-200 active:scale-95 transition">
+                    เริ่มรายการใหม่
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const MQTT_BROKER = "wss://broker.hivemq.com:8884/mqtt";
+        const CLIENT_ID = "WebPark_" + Math.random().toString(16).slice(2, 10);
+        const TICKET_KEY = "parking_ticket";
+        const TOPICS = {
+            inDetect: "parking/gate_in/detect",
+            outDetect: "parking/gate_out/detect",
+            inStatus: "parking/gate_in/status",
+            outStatus: "parking/gate_out/status",
+            inControl: "parking/gate_in/control",
+            outControl: "parking/gate_out/control"
+        };
+
+        let mqttClient = null;
+        let mqttConnected = false;
+        let latestOtpIn = null;
+        let latestOtpOut = null;
+        let currentView = "in";
+        let alertTimer = null;
+
+        window.addEventListener("load", () => {
+            bindInputs();
+            connectMQTT();
+            updateExitTicketUI();
+            checkUrlGateParam();
+            refreshActionButtons();
+            setInterval(updateExitTicketUI, 1000);
+        });
+
+        function bindInputs() {
+            ["input-otp-in", "input-otp-out"].forEach(id => {
+                const input = document.getElementById(id);
+                input.addEventListener("input", () => {
+                    input.value = input.value.replace(/\D/g, "").slice(0, 4);
+                    refreshActionButtons();
+                });
+                input.addEventListener("keydown", event => {
+                    if (event.key !== "Enter") return;
+                    if (id === "input-otp-in" && !document.getElementById("btn-entry").disabled) submitEntry();
+                    if (id === "input-otp-out" && !document.getElementById("btn-exit").disabled) submitExit();
+                });
+            });
+        }
+
+        function normalizeOtp(value) {
+            if (value === undefined || value === null) return null;
+            const otp = String(value).replace(/\D/g, "").slice(0, 4);
+            return otp.length === 4 ? otp : null;
+        }
+
+        function connectMQTT() {
+            setConnectionState("connecting");
+            mqttClient = mqtt.connect(MQTT_BROKER, {
+                clientId: CLIENT_ID,
+                clean: true,
+                reconnectPeriod: 1500,
+                connectTimeout: 7000,
+                keepalive: 30
+            });
+
+            mqttClient.on("connect", () => {
+                mqttConnected = true;
+                setConnectionState("connected");
+                mqttClient.subscribe([TOPICS.inDetect, TOPICS.outDetect, TOPICS.inStatus, TOPICS.outStatus]);
+                refreshActionButtons();
+            });
+
+            mqttClient.on("reconnect", () => {
+                mqttConnected = false;
+                setConnectionState("reconnecting");
+                refreshActionButtons();
+            });
+
+            mqttClient.on("offline", () => {
+                mqttConnected = false;
+                setConnectionState("offline");
+                refreshActionButtons();
+            });
+
+            mqttClient.on("close", () => {
+                mqttConnected = false;
+                setConnectionState("offline");
+                refreshActionButtons();
+            });
+
+            mqttClient.on("error", error => {
+                console.error("MQTT error:", error);
+                setConnectionState("error");
+            });
+
+            mqttClient.on("message", handleMQTTMessage);
+        }
+
+        function handleMQTTMessage(topic, payload) {
+            const raw = payload.toString();
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch {
+                data = { status: raw };
+            }
+
+            if (topic === TOPICS.inDetect) {
+                latestOtpIn = normalizeOtp(data.otp);
+                document.getElementById("in-sensor-status").innerText = latestOtpIn
+                    ? "พบรถแล้ว! กรุณากรอกรหัส OTP 4 หลักบนจอ LED"
+                    : "พบรถแล้ว กำลังรอ OTP จากบอร์ด";
+                document.getElementById("entry-step-1").className = "rounded-xl bg-emerald-500 text-white p-3";
+                document.getElementById("entry-step-2").className = "rounded-xl bg-indigo-600 text-white p-3";
+                document.getElementById("otp-hint-in").innerText = latestOtpIn ? "OTP พร้อมแล้ว • กรอกรหัสแล้วกดยืนยัน" : "กำลังรอ OTP";
+                if (currentView === "in") document.getElementById("input-otp-in").focus();
+                showAlert("พบรถที่ประตูขาเข้า • OTP พร้อมใช้งาน", "info");
+            }
+
+            if (topic === TOPICS.outDetect) {
+                latestOtpOut = normalizeOtp(data.otp);
+                document.getElementById("out-sensor-status").innerText = latestOtpOut
+                    ? "พบรถที่ประตูขาออกแล้ว • กรอกรหัสจากจอ LED"
+                    : "พบรถแล้ว กำลังรอ OTP ขาออก";
+                document.getElementById("otp-hint-out").innerText = latestOtpOut ? "OTP ขาออกพร้อมแล้ว" : "กำลังรอ OTP ขาออก";
+                if (currentView === "out") document.getElementById("input-otp-out").focus();
+                showAlert("พบรถที่ประตูขาออก • OTP พร้อมใช้งาน", "info");
+            }
+
+            if (topic === TOPICS.inStatus) handleGateStatus("in", data.status);
+            if (topic === TOPICS.outStatus) handleGateStatus("out", data.status);
+
+            refreshActionButtons();
+        }
+
+        function handleGateStatus(gate, rawStatus) {
+            const status = String(rawStatus || "").toUpperCase();
+
+            if (gate === "in") {
+                if (status === "OPENED") {
+                    showAlert("ไม้กั้นขาเข้าเปิดแล้ว • ขับรถผ่านได้เลย", "success");
+                    document.getElementById("entry-step-3").className = "rounded-xl bg-emerald-500 text-white p-3";
+                }
+                if (status === "CLEARED" || status === "CANCELLED") {
+                    latestOtpIn = null;
+                    document.getElementById("input-otp-in").value = "";
+                    document.getElementById("in-sensor-status").innerText = "กรุณาขับรถจอดหน้าเซนเซอร์เพื่อรับรหัส";
+                }
+            }
+
+            if (gate === "out") {
+                if (status === "OPENED") {
+                    showAlert("ไม้กั้นขาออกเปิดแล้ว • ขับรถผ่านได้เลย", "success");
+                    document.getElementById("out-sensor-status").innerText = "ไม้กั้นเปิดแล้ว • ขับรถผ่านประตู";
+                }
+                if (status === "CANCELLED") {
+                    latestOtpOut = null;
+                    const ticket = getTicket();
+                    if (ticket && ticket.exitPending) {
+                        ticket.exitPending = false;
+                        saveTicket(ticket);
+                    }
+                    document.getElementById("out-sensor-status").innerText = "ขับรถไปยังเซนเซอร์ขาออกเพื่อรับ OTP";
+                }
+                if (status === "CLEARED") {
+                    latestOtpOut = null;
+                    const ticket = getTicket();
+                    if (ticket && ticket.exitPending) {
+                        localStorage.removeItem(TICKET_KEY);
+                        document.getElementById("input-otp-out").value = "";
+                        showCompleteView();
+                        showAlert("ออกจากลานเรียบร้อย • ปิดตั๋วแล้ว", "success");
+                    }
+                }
+            }
+
+            updateExitTicketUI();
+            refreshActionButtons();
+        }
+
+        function getTicket() {
+            const raw = localStorage.getItem(TICKET_KEY);
+            if (!raw) return null;
+            try {
+                const ticket = JSON.parse(raw);
+                return ticket && ticket.entryTime ? ticket : null;
+            } catch {
+                return null;
+            }
+        }
+
+        function saveTicket(ticket) {
+            localStorage.setItem(TICKET_KEY, JSON.stringify(ticket));
+        }
+
+        function calculateParking(ticket) {
+            const entryDate = new Date(ticket.entryTime);
+            const diffMinutes = Math.max(1, Math.ceil((Date.now() - entryDate.getTime()) / 60000));
+            const chargeableMinutes = Math.max(0, diffMinutes - 15);
+            const fee = chargeableMinutes === 0 ? 0 : Math.ceil(chargeableMinutes / 60) * 20;
+            return { diffMinutes, fee };
+        }
+
+        function isTicketPaid(ticket) {
+            if (!ticket) return false;
+            const { fee } = calculateParking(ticket);
+            return fee === 0 || ticket.paid === true;
+        }
+
+        function submitEntry() {
+            const userOtp = normalizeOtp(document.getElementById("input-otp-in").value);
+            const existingTicket = getTicket();
+
+            if (!mqttConnected) return showAlert("ระบบยังไม่เชื่อมต่อ • กรุณารอสักครู่", "danger");
+            if (existingTicket) return showAlert("คุณมีตั๋วจอดรถที่กำลังใช้งานอยู่แล้ว", "danger");
+            if (!latestOtpIn) return showAlert("ยังไม่พบ OTP • ขับรถเข้าหน้าเซนเซอร์ก่อน", "danger");
+            if (!userOtp || userOtp !== latestOtpIn) return showAlert("รหัส OTP ไม่ถูกต้อง • กรุณาดูรหัสบนจอ LED", "danger");
+
+            const ticketData = {
+                id: "TKT-" + Math.floor(100000 + Math.random() * 900000),
+                entryTime: new Date().toISOString(),
+                paid: false,
+                paidAt: null,
+                exitPending: false
+            };
+
+            saveTicket(ticketData);
+            mqttClient.publish(TOPICS.inControl, "OPEN");
+            document.getElementById("input-otp-in").value = "";
+            document.getElementById("entry-step-3").className = "rounded-xl bg-emerald-500 text-white p-3";
+            showAlert("ยืนยันสำเร็จ • กำลังเปิดไม้กั้นและสร้าง E-Ticket", "success");
+            updateExitTicketUI();
+
+            setTimeout(() => showTicketView(), 450);
+        }
+
+        function updateExitTicketUI() {
+            const ticket = getTicket();
+            const noTicket = document.getElementById("no-ticket-box");
+            const content = document.getElementById("exit-ticket-content");
+            const existingNote = document.getElementById("existing-ticket-note");
+
+            existingNote.classList.toggle("hidden", !ticket);
+            noTicket.classList.toggle("hidden", Boolean(ticket));
+            content.classList.toggle("hidden", !ticket);
+
+            if (!ticket) {
+                document.getElementById("ticket-id").innerText = "-";
+                document.getElementById("entry-time").innerText = "-";
+                document.getElementById("park-duration").innerText = "0 นาที";
+                document.getElementById("park-fee").innerText = "0 บาท";
+                refreshActionButtons();
+                return;
+            }
+
+            const entryDate = new Date(ticket.entryTime);
+            const { diffMinutes, fee } = calculateParking(ticket);
+            const paid = isTicketPaid(ticket);
+            const durationText = formatDuration(diffMinutes);
+
+            document.getElementById("ticket-id").innerText = ticket.id || "TICKET";
+            document.getElementById("entry-time").innerText = entryDate.toLocaleString("th-TH", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+            document.getElementById("park-duration").innerText = durationText;
+            document.getElementById("park-fee").innerText = `${fee} บาท`;
+
+            document.getElementById("ticket-page-id").innerText = ticket.id || "TICKET";
+            document.getElementById("ticket-page-entry").innerText = entryDate.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+            document.getElementById("ticket-page-duration").innerText = durationText;
+            document.getElementById("ticket-page-fee").innerText = `${fee} บาท`;
+
+            const pageStatus = document.getElementById("ticket-page-status");
+            if (ticket.exitPending) {
+                pageStatus.innerText = "EXITING";
+                pageStatus.className = "text-[10px] px-2 py-1 rounded-full bg-sky-500/20 text-sky-300 font-bold";
+            } else if (paid) {
+                pageStatus.innerText = fee === 0 ? "FREE" : "PAID";
+                pageStatus.className = "text-[10px] px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300 font-bold";
+            } else {
+                pageStatus.innerText = "ACTIVE";
+                pageStatus.className = "text-[10px] px-2 py-1 rounded-full bg-amber-500/20 text-amber-300 font-bold";
+            }
+
+            const btnPay = document.getElementById("btn-pay");
+            const paymentNote = document.getElementById("payment-note");
+            if (fee === 0) {
+                btnPay.disabled = true;
+                btnPay.innerText = "✓ อยู่ในช่วงจอดฟรี";
+                btnPay.className = "w-full py-3 bg-emerald-100 text-emerald-700 font-bold rounded-2xl cursor-default";
+                paymentNote.innerText = "จอดฟรีภายใน 15 นาที • พร้อมไปยืนยัน OTP ขาออก";
+                paymentNote.className = "rounded-2xl bg-emerald-50 border border-emerald-100 p-3 text-center text-xs text-emerald-700";
+            } else if (ticket.paid) {
+                btnPay.disabled = true;
+                btnPay.innerText = "✓ ชำระเงินเรียบร้อยแล้ว";
+                btnPay.className = "w-full py-3 bg-emerald-500 text-white font-bold rounded-2xl shadow-md cursor-default";
+                paymentNote.innerText = "ชำระแล้ว • ขับรถไปยังเซนเซอร์ขาออกเพื่อรับ OTP";
+                paymentNote.className = "rounded-2xl bg-emerald-50 border border-emerald-100 p-3 text-center text-xs text-emerald-700";
+            } else {
+                btnPay.disabled = false;
+                btnPay.innerText = `💳 ชำระเงิน ${fee} บาท`;
+                btnPay.className = "w-full py-3 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-2xl shadow-md transition active:scale-95";
+                paymentNote.innerText = "ฟรี 15 นาทีแรก • หลังจากนั้น 20 บาท/ชั่วโมง";
+                paymentNote.className = "rounded-2xl bg-slate-50 border border-slate-100 p-3 text-center text-xs text-slate-500";
+            }
+
+            if (ticket.exitPending) {
+                document.getElementById("out-sensor-status").innerText = "ส่งคำสั่งเปิดแล้ว • ขับรถผ่านไม้กั้น ระบบจะปิดตั๋วเมื่อได้รับ CLEARED";
+            }
+
+            refreshActionButtons();
+        }
+
+        function payFee() {
+            const ticket = getTicket();
+            if (!ticket) return showAlert("ไม่มีรายการตั๋วให้ชำระเงิน", "danger");
+            const { fee } = calculateParking(ticket);
+
+            ticket.paid = true;
+            ticket.paidAt = new Date().toISOString();
+            saveTicket(ticket);
+            updateExitTicketUI();
+
+            if (fee === 0) showAlert("ยังอยู่ในช่วงจอดฟรี • ไปยืนยัน OTP ขาออกได้เลย", "success");
+            else showAlert(`ชำระเงิน ${fee} บาทเรียบร้อย • พร้อมออกจากลาน`, "success");
+
+            if (latestOtpOut) setTimeout(() => document.getElementById("input-otp-out").focus(), 250);
+        }
+
+        function submitExit() {
+            const ticket = getTicket();
+            const userOtp = normalizeOtp(document.getElementById("input-otp-out").value);
+
+            if (!mqttConnected) return showAlert("ระบบยังไม่เชื่อมต่อ • กรุณารอสักครู่", "danger");
+            if (!ticket) return showAlert("ไม่พบบันทึกตั๋วเข้าจอดในเครื่องของคุณ", "danger");
+            if (ticket.exitPending) return showAlert("ส่งคำสั่งเปิดประตูแล้ว • กรุณาขับรถผ่าน", "info");
+            if (!isTicketPaid(ticket)) return showAlert("กรุณาชำระค่าบริการก่อนออก", "danger");
+            if (!latestOtpOut) return showAlert("ยังไม่มี OTP ขาออก • ขับรถเข้าหน้าเซนเซอร์ก่อน", "danger");
+            if (!userOtp || userOtp !== latestOtpOut) return showAlert("รหัส OTP ขาออกไม่ถูกต้อง", "danger");
+
+            ticket.exitPending = true;
+            ticket.exitRequestedAt = new Date().toISOString();
+            saveTicket(ticket);
+            mqttClient.publish(TOPICS.outControl, "OPEN");
+            document.getElementById("input-otp-out").value = "";
+            document.getElementById("out-sensor-status").innerText = "กำลังเปิดไม้กั้น • เมื่อรถผ่าน ระบบจะปิดตั๋วอัตโนมัติ";
+            showAlert("ยืนยันสำเร็จ • กำลังเปิดไม้กั้นขาออก", "success");
+            updateExitTicketUI();
+        }
+
+        function refreshActionButtons() {
+            const ticket = getTicket();
+            const inOtp = normalizeOtp(document.getElementById("input-otp-in").value);
+            const outOtp = normalizeOtp(document.getElementById("input-otp-out").value);
+
+            const btnEntry = document.getElementById("btn-entry");
+            btnEntry.disabled = !(mqttConnected && !ticket && latestOtpIn && inOtp);
+
+            const btnExit = document.getElementById("btn-exit");
+            const exitReady = mqttConnected && ticket && !ticket.exitPending && isTicketPaid(ticket) && latestOtpOut && outOtp;
+            btnExit.disabled = !exitReady;
+            btnExit.innerText = ticket && ticket.exitPending ? "กำลังรอรถผ่านประตู..." : "ยืนยันออก & เปิดไม้กั้น";
+        }
+
+        function showTicketView() {
+            if (!getTicket()) return switchTab("in");
+            hideAllViews();
+            currentView = "ticket";
+            document.getElementById("view-ticket").classList.remove("hidden");
+            updateExitTicketUI();
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+
+        function showCompleteView() {
+            hideAllViews();
+            currentView = "complete";
+            document.getElementById("view-complete").classList.remove("hidden");
+            document.getElementById("tab-bar").classList.add("hidden");
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+
+        function hideAllViews() {
+            ["view-in", "view-out", "view-ticket", "view-complete"].forEach(id => document.getElementById(id).classList.add("hidden"));
+            document.getElementById("tab-bar").classList.remove("hidden");
+        }
+
+        function switchTab(mode) {
+            hideAllViews();
+            const tabIn = document.getElementById("tab-in");
+            const tabOut = document.getElementById("tab-out");
+
+            if (mode === "out") {
+                currentView = "out";
+                document.getElementById("view-out").classList.remove("hidden");
+                tabOut.className = "flex-1 py-3 border-b-2 border-indigo-600 text-indigo-600 transition";
+                tabIn.className = "flex-1 py-3 text-slate-400 border-b-2 border-transparent transition";
+                updateExitTicketUI();
+            } else {
+                currentView = "in";
+                document.getElementById("view-in").classList.remove("hidden");
+                tabIn.className = "flex-1 py-3 border-b-2 border-indigo-600 text-indigo-600 transition";
+                tabOut.className = "flex-1 py-3 text-slate-400 border-b-2 border-transparent transition";
+                updateExitTicketUI();
+            }
+            refreshActionButtons();
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+
+        function checkUrlGateParam() {
+            const gate = new URLSearchParams(window.location.search).get("gate");
+            if (gate === "out") return switchTab("out");
+            if (gate === "in") return switchTab("in");
+            if (getTicket()) return showTicketView();
+            switchTab("in");
+        }
+
+        function startNewSession() {
+            latestOtpIn = null;
+            latestOtpOut = null;
+            document.getElementById("tab-bar").classList.remove("hidden");
+            switchTab("in");
+        }
+
+        function setConnectionState(mode) {
+            const dot = document.getElementById("status-dot");
+            const text = document.getElementById("status-text");
+            const badge = document.getElementById("status-badge");
+
+            const states = {
+                connected: ["เชื่อมต่อระบบเรียบร้อย", "bg-emerald-400", "bg-indigo-800 text-indigo-100"],
+                connecting: ["กำลังเชื่อมต่อ MQTT Broker...", "bg-yellow-400 animate-pulse", "bg-indigo-800 text-indigo-200"],
+                reconnecting: ["กำลังเชื่อมต่อใหม่...", "bg-yellow-400 animate-pulse", "bg-indigo-800 text-indigo-200"],
+                offline: ["ระบบออฟไลน์ • กำลังลองใหม่", "bg-rose-400", "bg-indigo-800 text-rose-200"],
+                error: ["เชื่อมต่อระบบไม่ได้", "bg-rose-400", "bg-indigo-800 text-rose-200"]
+            };
+            const cfg = states[mode] || states.connecting;
+            text.innerText = cfg[0];
+            dot.className = `w-2 h-2 rounded-full ${cfg[1]}`;
+            badge.className = `relative inline-flex items-center gap-2 mt-3 px-3 py-1 rounded-full text-xs font-medium ${cfg[2]}`;
+        }
+
+        function showAlert(msg, type) {
+            const box = document.getElementById("alert-box");
+            clearTimeout(alertTimer);
+            box.classList.remove("hidden", "bg-red-50", "text-red-600", "bg-emerald-50", "text-emerald-600", "bg-indigo-50", "text-indigo-600");
+            box.innerText = msg;
+
+            if (type === "danger") box.classList.add("bg-red-50", "text-red-600");
+            else if (type === "success") box.classList.add("bg-emerald-50", "text-emerald-600");
+            else box.classList.add("bg-indigo-50", "text-indigo-600");
+
+            alertTimer = setTimeout(() => box.classList.add("hidden"), 4200);
+        }
+
+        function formatDuration(minutes) {
+            if (minutes < 60) return `${minutes} นาที`;
+            const hours = Math.floor(minutes / 60);
+            const mins = minutes % 60;
+            return mins ? `${hours} ชม. ${mins} นาที` : `${hours} ชม.`;
+        }
+    </script>
+</body>
+</html>
